@@ -46,6 +46,11 @@
 #include "ReadWrite/foleys_ClipRenderer.cpp"
 
 #if FOLEYS_USE_FFMPEG
+#include "ReadWrite/FFmpeg/foleys_DecodePrimitives.cpp"
+#include "ReadWrite/FFmpeg/foleys_FFmpegDecodeBackend.cpp"
+#include "ReadWrite/FFmpeg/foleys_CoreAudioEAC3Backend.cpp"
+#include "ReadWrite/FFmpeg/foleys_AVPlayerEAC3Backend.cpp"
+#include "ReadWrite/FFmpeg/foleys_AVFoundationDecodeBackend.cpp"
 #include "ReadWrite/FFmpeg/foleys_FFmpegReader.cpp"
 #include "ReadWrite/FFmpeg/foleys_FFmpegWriter.cpp"
 #include "ReadWrite/FFmpeg/foleys_FFmpegFormat.cpp"

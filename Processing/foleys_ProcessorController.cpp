@@ -52,6 +52,16 @@ struct AudioProcessorAdapter : public ProcessorController::ProcessorAdapter
     public:
         PlayHead() = default;
 
+#if JUCE_VERSION >= 0x080000
+        juce::Optional<juce::AudioPlayHead::PositionInfo> getPosition() const override
+        {
+            juce::AudioPlayHead::PositionInfo result;
+            result.setTimeInSamples (timeInSamples);
+            result.setTimeInSeconds (timeInSeconds);
+            result.setFrameRate (frameRate);
+            return result;
+        }
+#else
         bool getCurrentPosition (juce::AudioPlayHead::CurrentPositionInfo &result) override
         {
             result.timeInSamples = timeInSamples;
@@ -59,6 +69,7 @@ struct AudioProcessorAdapter : public ProcessorController::ProcessorAdapter
             result.frameRate = frameRate;
             return true;
         }
+#endif
 
         bool canControlTransport() override
         {

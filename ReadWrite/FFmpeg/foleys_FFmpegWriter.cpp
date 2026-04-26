@@ -80,7 +80,9 @@ struct FFmpegWriter::Pimpl
         context->time_base = av_make_q (1, settings.timebase);
 
         if (encoder->id == AV_CODEC_ID_H264)
+    #if LIBAVCODEC_VERSION_MAJOR < 61
             context->ticks_per_frame = 2;
+    #endif
 
         avcodec_parameters_from_context (stream->codecpar, context);
 
@@ -133,14 +135,13 @@ struct FFmpegWriter::Pimpl
             return -1;
         }
 
-        auto channelLayout = uint64_t (AV_CH_LAYOUT_STEREO);
+        auto channelLayout = makeStereoChannelLayout();
 
         stream->time_base = av_make_q (1, settings.timebase);
         auto* context = avcodec_alloc_context3 (encoder);
         context->sample_rate = settings.timebase;
         context->sample_fmt = AV_SAMPLE_FMT_FLTP;
-        context->channel_layout = channelLayout;
-        context->channels = av_get_channel_layout_nb_channels (channelLayout);
+        setCodecContextChannelLayout (context, channelLayout);
         context->bit_rate = 64000;
         context->frame_size = settings.defaultNumSamples;
         context->bits_per_raw_sample = 32;
@@ -245,15 +246,19 @@ struct FFmpegWriter::Pimpl
         jassert (descriptor.settings.defaultNumSamples >= buffer.getNumSamples());
 
         FFmpegFrame frame;
+        auto channelLayout = makeStereoChannelLayout();
 
         frame.frame->nb_samples   = buffer.getNumSamples();
         frame.frame->format       = AV_SAMPLE_FMT_FLTP;
-        frame.frame->channel_layout = AV_CH_LAYOUT_STEREO;
-        frame.frame->channels     = av_get_channel_layout_nb_channels (frame.frame->channel_layout);
+        setFrameChannelLayout (frame.frame, channelLayout);
         frame.frame->pts          = timestamp;
         FOLEYS_LOG ("Start writing audio frame, pts: " << timestamp);
 
-        auto  bufferSize = av_samples_get_buffer_size (nullptr, frame.frame->channels, frame.frame->nb_samples, AVSampleFormat (frame.frame->format), 0);
+        auto  bufferSize = av_samples_get_buffer_size (nullptr,
+                                   getChannelLayoutChannelCount (channelLayout),
+                                   frame.frame->nb_samples,
+                                   AVSampleFormat (frame.frame->format),
+                                   0);
         if (descriptor.converterBuffer.getData() == nullptr)
             descriptor.converterBuffer.malloc (bufferSize);
 
@@ -276,7 +281,7 @@ struct FFmpegWriter::Pimpl
         }
 
         avcodec_fill_audio_frame (frame.frame,
-                                  frame.frame->channels,
+                                  getChannelLayoutChannelCount (channelLayout),
                                   AVSampleFormat (frame.frame->format),
                                   descriptor.converterBuffer.getData(),
                                   bufferSize,

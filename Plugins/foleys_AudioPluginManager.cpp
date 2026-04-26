@@ -27,7 +27,7 @@ AudioPluginManager::AudioPluginManager (VideoEngine& videoEngineToUse)
     // If no plugin hosting is selected, this would issue a warning
     juce::ignoreUnused (videoEngine);
 
-    pluginManager.addDefaultFormats();
+    juce::addHeadlessDefaultFormatsToManager (pluginManager);
 }
 
 void AudioPluginManager::registerAudioProcessor (const juce::String& identifierString, std::function<std::unique_ptr<juce::AudioProcessor>()> factory)

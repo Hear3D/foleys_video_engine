@@ -45,6 +45,7 @@ extern "C" {
 #include <libavutil/pixdesc.h>
 #include <libavutil/imgutils.h>
 #include <libavutil/opt.h>
+#include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
 #include <libswscale/swscale.h>
 #include <libswresample/swresample.h>
@@ -59,6 +60,148 @@ extern "C" {
 
 namespace foleys
 {
+
+#if LIBAVUTIL_VERSION_MAJOR >= 57
+using FoleysChannelLayout = AVChannelLayout;
+
+inline bool copyChannelLayout (FoleysChannelLayout& destination, const AVCodecParameters* codecParameters)
+{
+    av_channel_layout_uninit (&destination);
+    return av_channel_layout_copy (&destination, &codecParameters->ch_layout) >= 0;
+}
+
+inline void resetChannelLayout (FoleysChannelLayout& layout)
+{
+    av_channel_layout_uninit (&layout);
+}
+
+inline int getCodecContextChannelCount (const AVCodecContext* context)
+{
+    return context->ch_layout.nb_channels;
+}
+
+inline int getFrameChannelCount (const AVFrame* frame)
+{
+    return frame->ch_layout.nb_channels;
+}
+
+inline int getChannelLayoutChannelCount (const FoleysChannelLayout& layout)
+{
+    return layout.nb_channels;
+}
+
+inline int64_t getFrameDuration (const AVFrame* frame)
+{
+    return frame->duration;
+}
+
+inline int allocateResampler (SwrContext** context,
+                              const FoleysChannelLayout& outChannelLayout,
+                              AVSampleFormat outFormat,
+                              int outSampleRate,
+                              const FoleysChannelLayout& inChannelLayout,
+                              AVSampleFormat inFormat,
+                              int inSampleRate)
+{
+    return swr_alloc_set_opts2 (context,
+                                &outChannelLayout,
+                                outFormat,
+                                outSampleRate,
+                                &inChannelLayout,
+                                inFormat,
+                                inSampleRate,
+                                0,
+                                nullptr);
+}
+
+inline FoleysChannelLayout makeStereoChannelLayout()
+{
+    FoleysChannelLayout layout {};
+    av_channel_layout_default (&layout, 2);
+    return layout;
+}
+
+inline void setCodecContextChannelLayout (AVCodecContext* context, const FoleysChannelLayout& layout)
+{
+    av_channel_layout_uninit (&context->ch_layout);
+    av_channel_layout_copy (&context->ch_layout, &layout);
+}
+
+inline void setFrameChannelLayout (AVFrame* frame, const FoleysChannelLayout& layout)
+{
+    av_channel_layout_uninit (&frame->ch_layout);
+    av_channel_layout_copy (&frame->ch_layout, &layout);
+}
+#else
+using FoleysChannelLayout = int64_t;
+
+inline bool copyChannelLayout (FoleysChannelLayout& destination, const AVCodecParameters* codecParameters)
+{
+    destination = codecParameters->channel_layout;
+    return true;
+}
+
+inline void resetChannelLayout (FoleysChannelLayout&)
+{
+}
+
+inline int getCodecContextChannelCount (const AVCodecContext* context)
+{
+    return context->channels;
+}
+
+inline int getFrameChannelCount (const AVFrame* frame)
+{
+    return av_get_channel_layout_nb_channels (frame->channel_layout);
+}
+
+inline int getChannelLayoutChannelCount (const FoleysChannelLayout& layout)
+{
+    return av_get_channel_layout_nb_channels (layout);
+}
+
+inline int64_t getFrameDuration (const AVFrame* frame)
+{
+    return frame->pkt_duration;
+}
+
+inline int allocateResampler (SwrContext** context,
+                              const FoleysChannelLayout& outChannelLayout,
+                              AVSampleFormat outFormat,
+                              int outSampleRate,
+                              const FoleysChannelLayout& inChannelLayout,
+                              AVSampleFormat inFormat,
+                              int inSampleRate)
+{
+    *context = swr_alloc_set_opts (*context,
+                                   outChannelLayout,
+                                   outFormat,
+                                   outSampleRate,
+                                   inChannelLayout,
+                                   inFormat,
+                                   inSampleRate,
+                                   0,
+                                   nullptr);
+    return *context != nullptr ? 0 : AVERROR (ENOMEM);
+}
+
+inline FoleysChannelLayout makeStereoChannelLayout()
+{
+    return AV_CH_LAYOUT_STEREO;
+}
+
+inline void setCodecContextChannelLayout (AVCodecContext* context, const FoleysChannelLayout& layout)
+{
+    context->channel_layout = layout;
+    context->channels = av_get_channel_layout_nb_channels (layout);
+}
+
+inline void setFrameChannelLayout (AVFrame* frame, const FoleysChannelLayout& layout)
+{
+    frame->channel_layout = layout;
+    frame->channels = av_get_channel_layout_nb_channels (layout);
+}
+#endif
 
 class FFmpegVideoScaler
 {
@@ -217,18 +360,17 @@ public:
             swr_free (&context);
     }
 
-    void setupConverter (int64_t inChannelLayout,  AVSampleFormat inFormat,  int inSampleRate,
-                         int64_t outChannelLayout, AVSampleFormat outFormat, int outSampleRate)
+    void setupConverter (const FoleysChannelLayout& inChannelLayout,  AVSampleFormat inFormat,  int inSampleRate,
+                         const FoleysChannelLayout& outChannelLayout, AVSampleFormat outFormat, int outSampleRate)
     {
-        context = swr_alloc_set_opts (context,
-                                      outChannelLayout,
-                                      outFormat,
-                                      outSampleRate,
-                                      inChannelLayout,
-                                      inFormat,
-                                      inSampleRate,
-                                      0,         // log_offset
-                                      nullptr);  // log_ctx
+        if (allocateResampler (&context,
+                               outChannelLayout,
+                               outFormat,
+                               outSampleRate,
+                               inChannelLayout,
+                               inFormat,
+                               inSampleRate) < 0)
+            context = nullptr;
 
     }
 private:

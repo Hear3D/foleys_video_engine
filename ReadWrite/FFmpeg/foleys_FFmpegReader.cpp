@@ -21,6 +21,10 @@
 #if FOLEYS_USE_FFMPEG
 
 #include "foleys_FFmpegHelpers.h"
+#include "foleys_FFmpegDecodeBackend.h"
+#include "foleys_AVFoundationDecodeBackend.h"
+#include "foleys_CoreAudioEAC3Backend.h"
+#include "foleys_AVPlayerEAC3Backend.h"
 
 
 namespace foleys
@@ -74,11 +78,30 @@ public:
         if (juce::isPositiveAndBelow (audioStreamIdx, static_cast<int> (formatContext->nb_streams)))
         {
             auto* stream = formatContext->streams [audioStreamIdx];
-            channelLayout = stream->codecpar->channel_layout;
+            if (! copyChannelLayout (channelLayout, stream->codecpar))
+            {
+                FOLEYS_LOG ("Unable to copy audio channel layout");
+                closeVideoFile();
+                return;
+            }
 
             reader.sampleRate  = audioContext->sample_rate;
-            reader.numChannels = audioContext->channels;
             reader.numSamples  = stream->duration > 0 ? stream->duration : std::numeric_limits<int64_t>::max();
+
+#if JUCE_MAC
+            if (audioContext->codec_id == AV_CODEC_ID_EAC3)
+                backend = std::make_unique<AVPlayerEAC3Backend> (audioContext->sample_rate);
+            else
+#endif
+                backend = std::make_unique<FFmpegDecodeBackend> (audioContext, channelLayout);
+
+            if (backend != nullptr && backend->open (file, audioContext->sample_rate))
+                reader.numChannels = backend->getNumChannels();
+            else
+            {
+                backend.reset();
+                reader.numChannels = getCodecContextChannelCount (audioContext);
+            }
 
             if (! setOutputSampleRate (audioContext->sample_rate))
             {
@@ -128,6 +151,7 @@ public:
     void closeVideoFile()
     {
         reader.opened = false;
+        resetChannelLayout (channelLayout);
 
         if (videoStreamIdx >= 0)
         {
@@ -158,11 +182,14 @@ public:
 
     void processPacket (VideoFifo& videoFifo, AudioFifo& audioFifo)
     {
-        AVPacket packet;
-        // initialize packet, set data to nullptr, let the demuxer fill it
-        packet.data = nullptr;
-        packet.size = 0;
-        av_init_packet (&packet);
+        if (backend != nullptr && backend->isPullBased())
+        {
+            auto block = backend->readNextBlock();
+            if (block.buffer.getNumSamples() > 0)
+                pushDecodedBlock (std::move (block), audioFifo);
+        }
+
+        AVPacket packet {};
 
         auto error = av_read_frame (formatContext, &packet);
 
@@ -171,7 +198,23 @@ public:
                 decodePacket (packet, videoFifo);
             }
             else if (packet.stream_index == audioStreamIdx) {
-                decodePacket (packet, audioFifo);
+                if (backend != nullptr)
+                {
+                    backend->pushPacket (packet);
+
+                    while (true)
+                    {
+                        auto block = backend->readNextBlock();
+                        if (block.buffer.getNumSamples() <= 0)
+                            break;
+
+                        pushDecodedBlock (std::move (block), audioFifo);
+                    }
+                }
+                else
+                {
+                    decodePacket (packet, audioFifo);
+                }
             }
             else if (packet.stream_index == subtitleStreamIdx) {
                 decodeSubtitlePacket (packet);
@@ -193,6 +236,9 @@ public:
         {
             FOLEYS_LOG ("Error seeking in audio stream: " << getErrorString (response));
         }
+
+        if (backend != nullptr)
+            backend->setPosition (position);
     }
 
     juce::Image getStillImage (double seconds, Size size)
@@ -212,7 +258,6 @@ public:
         }
 
         AVPacket* packet = av_packet_alloc();
-        av_init_packet (packet);
 
         while (true)
         {
@@ -231,7 +276,7 @@ public:
                     FOLEYS_LOG ("Error reading frame for still image: " << getErrorString (response));
                 }
 
-                if (frame->best_effort_timestamp + frame->pkt_duration > targetPts)
+                if (frame->best_effort_timestamp + getFrameDuration (frame) > targetPts)
                     break;
             }
         }
@@ -247,6 +292,12 @@ public:
     {
         outputSampleRate = sr;
 
+        if (backend != nullptr)
+        {
+            backend->setOutputSampleRate (sr);
+            return true;
+        }
+
         if (audioContext == nullptr)
         {
             if (juce::isPositiveAndBelow (videoStreamIdx, formatContext->nb_streams))
@@ -256,15 +307,14 @@ public:
             return false;
         }
 
-        audioConverterContext = swr_alloc_set_opts (audioConverterContext,
-                                                    int64_t (channelLayout),    // out_ch_layout
-                                                    AV_SAMPLE_FMT_FLTP,         // out_sample_fmt
-                                                    juce::roundToInt (sr),      // out_sample_rate
-                                                    int64_t (channelLayout),    // in_ch_layout
-                                                    audioContext->sample_fmt,   // in_sample_fmt
-                                                    audioContext->sample_rate,  // in_sample_rate
-                                                    0,                          // log_offset
-                                                    nullptr);                   // log_ctx
+        if (allocateResampler (&audioConverterContext,
+                               channelLayout,
+                               AV_SAMPLE_FMT_FLTP,
+                               juce::roundToInt (sr),
+                               channelLayout,
+                               audioContext->sample_fmt,
+                               audioContext->sample_rate) < 0)
+            return false;
 
         return swr_init (audioConverterContext) >= 0;
     }
@@ -334,7 +384,7 @@ public:
         juce::ignoreUnused (streamIndex);
 
         foleys::AudioStreamSettings settings;
-        settings.numChannels = audioContext->channels;
+        settings.numChannels = reader.numChannels;
         settings.timebase = audioContext->sample_rate;
         settings.defaultNumSamples = int (audioContext->max_samples);
         return settings;
@@ -349,11 +399,24 @@ public:
 
 private:
 
+    void pushDecodedBlock (DecodedAudioBlock&& block, AudioFifo& audioFifo)
+    {
+        if (block.buffer.getNumSamples() <= 0)
+            return;
+
+        if (block.layout.has_value())
+            channelMapResolver.configureFromLayout (&(*block.layout));
+
+        auto canonical = normalizeToAtmos714 (block, &channelMapResolver);
+        juce::ignoreUnused (hostBusMapper);
+        audioFifo.pushSamples (canonical.buffer);
+    }
+
     int openCodecContext (AVCodecContext** decoderContext,
                           enum AVMediaType type,
                           bool refCounted)
     {
-        AVCodec *decoder = nullptr;
+        const AVCodec* decoder = nullptr;
         AVDictionary *opts = nullptr;
 
         int id = av_find_best_stream (formatContext, type, -1, -1, nullptr, 0);
@@ -463,7 +526,7 @@ private:
 
             if (frame->extended_data != nullptr  && reader.sampleRate > 0)
             {
-                const int  channels     = av_get_channel_layout_nb_channels (frame->channel_layout);
+                const int  channels     = getFrameChannelCount (frame);
                 const auto numSamples   = frame->nb_samples;
                 const auto outTimestamp = int64_t (frame->best_effort_timestamp * outputSampleRate / reader.sampleRate);
                 const auto numProduced  = int (numSamples * outputSampleRate / reader.sampleRate);
@@ -520,10 +583,13 @@ private:
 
     AVFrame  *frame             = nullptr;
 
-    uint64_t  channelLayout = AV_CH_LAYOUT_STEREO;
+    FoleysChannelLayout channelLayout = makeStereoChannelLayout();
     double    outputSampleRate = {};
 
     juce::AudioBuffer<float>  audioConvertBuffer;
+    std::unique_ptr<IAudioDecodeBackend> backend;
+    ChannelMapResolver channelMapResolver;
+    HostBusMapper hostBusMapper;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (Pimpl)
 };

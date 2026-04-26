@@ -145,6 +145,8 @@
 #include "Widgets/foleys_OpenGLView.h"
 
 #if FOLEYS_USE_FFMPEG
+#include "ReadWrite/FFmpeg/foleys_DecodePrimitives.h"
+#include "ReadWrite/FFmpeg/foleys_IAudioDecodeBackend.h"
 #include "ReadWrite/FFmpeg/foleys_FFmpegReader.h"
 #include "ReadWrite/FFmpeg/foleys_FFmpegWriter.h"
 #include "ReadWrite/FFmpeg/foleys_FFmpegFormat.h"
