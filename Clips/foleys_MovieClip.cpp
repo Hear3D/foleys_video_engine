@@ -322,6 +322,7 @@ int MovieClip::BackgroundReaderJob::useTimeSlice()
     {
         juce::ScopedValueSetter<bool> guard (inDecodeBlock, true);
         owner.movieReader->readNewData (owner.videoFifo, owner.audioFifo);
+        videoPlaying = true;
     }
 
     if (owner.movieReader.get() != nullptr)
@@ -351,6 +352,16 @@ void MovieClip::BackgroundReaderJob::setSuspended (bool s)
 bool MovieClip::BackgroundReaderJob::isSuspended() const
 {
     return suspended;
+}
+
+bool MovieClip::BackgroundReaderJob::isVideoPlaying() const
+{
+    return videoPlaying;
+}
+
+bool MovieClip::isVideoPlaying() const
+{
+    return backgroundJob.isVideoPlaying();
 }
 
 juce::TimeSliceClient* MovieClip::getBackgroundJob()

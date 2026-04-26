@@ -214,7 +214,7 @@ void ParameterAutomation::setKeyframes (std::map<double, double> keys)
 
 void ParameterAutomation::loadFromValueTree()
 {
-    juce::ScopedValueSetter<bool>(manualUpdate, true);
+    const juce::ScopedValueSetter<bool> scopedManualUpdate (manualUpdate, true);
 
     std::map<double, double> newKeyframes;
     for (const auto& child : state)
