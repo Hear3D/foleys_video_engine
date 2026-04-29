@@ -57,21 +57,47 @@ struct AVPlayerEAC3BackendImpl
 
     void releaseAll()
     {
-        if (player != nil)
-        {
-            // AVPlayer must be paused on the main thread.
-            AVPlayer* p = player;  // raw copy — we still hold the CFRetain
-            player = nil;
-            if ([NSThread isMainThread])
-                [p pause];
-            else
-                dispatch_sync (dispatch_get_main_queue(), ^{ [p pause]; });
-            CFRelease ((__bridge CFTypeRef) p);  // balance the CFRetain from openFile()
-        }
-        if (item != nil)  { CFRelease ((__bridge CFTypeRef) item);  item  = nil; }
-        if (asset != nil) { CFRelease ((__bridge CFTypeRef) asset); asset = nil; }
+        AVPlayer* localPlayer = player;
+        AVPlayerItem* localItem = item;
+        AVURLAsset* localAsset = asset;
+        MTAudioProcessingTapRef localTap = tap;
+
+        player = nil;
+        item = nil;
+        asset = nil;
+        tap = nullptr;
         hasStartedPlaying = false;
-        if (tap != nullptr) { CFRelease (tap); tap = nullptr; }
+
+        if (localPlayer != nil)
+        {
+            auto detachPlayer = ^{
+                [localPlayer pause];
+                [localPlayer replaceCurrentItemWithPlayerItem:nil];
+            };
+
+            if ([NSThread isMainThread])
+                detachPlayer();
+            else
+                dispatch_sync (dispatch_get_main_queue(), detachPlayer);
+        }
+
+        if (localItem != nil)
+        {
+            [localItem cancelPendingSeeks];
+            localItem.audioMix = nil;
+        }
+
+        if (localTap != nullptr)
+            CFRelease (localTap);
+
+        if (localItem != nil)
+            CFRelease ((__bridge CFTypeRef) localItem);
+
+        if (localAsset != nil)
+            CFRelease ((__bridge CFTypeRef) localAsset);
+
+        if (localPlayer != nil)
+            CFRelease ((__bridge CFTypeRef) localPlayer);
     }
 
     ~AVPlayerEAC3BackendImpl() { releaseAll(); }
@@ -147,7 +173,10 @@ struct AVPlayerEAC3BackendImpl
         {
             hasStartedPlaying = true;  // set BEFORE dispatch to prevent double-call
             __strong AVPlayer* p = player;
-            dispatch_async (dispatch_get_main_queue(), ^{ [p play]; });
+            dispatch_async (dispatch_get_main_queue(), ^{
+                if (p.currentItem != nil)
+                    [p play];
+            });
             LOGI ("AVPlayerEAC3Backend starting playback (dispatched to main thread)");
         }
 
@@ -317,10 +346,16 @@ struct AVPlayerEAC3BackendImpl
         __strong AVPlayer* p = player;
         hasStartedPlaying = true;  // set before dispatch
         auto seekBlock = ^{
+            if (p.currentItem == nil)
+                return;
+
             [p seekToTime:seekTime
                toleranceBefore:kCMTimeZero
                 toleranceAfter:kCMTimeZero
-             completionHandler:^(BOOL) { [p play]; }];
+             completionHandler:^(BOOL) {
+                 if (p.currentItem != nil)
+                     [p play];
+             }];
         };
 
         if ([NSThread isMainThread])
