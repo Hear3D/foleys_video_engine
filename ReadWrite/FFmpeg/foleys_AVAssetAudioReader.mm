@@ -15,6 +15,8 @@ namespace foleys
 
 namespace
 {
+constexpr AudioChannelLayoutTag kAtmos714Tag = (AudioChannelLayoutTag) ((190u << 16) | 12u);
+
 AudioChannelLayout copyLayoutFrom (CMAudioFormatDescriptionRef fmt, bool& ok)
 {
     AudioChannelLayout copied {};
@@ -31,6 +33,36 @@ AudioChannelLayout copyLayoutFrom (CMAudioFormatDescriptionRef fmt, bool& ok)
     copied = *layout;
     ok = true;
     return copied;
+}
+
+NSDictionary* makeOutputSettings (double sampleRate, int requestedChannels, NSData* channelLayoutData)
+{
+    NSMutableDictionary* settings = [@{
+        AVFormatIDKey: @(kAudioFormatLinearPCM),
+        AVSampleRateKey: @(sampleRate),
+        AVLinearPCMBitDepthKey: @(32),
+        AVLinearPCMIsFloatKey: @YES,
+        AVLinearPCMIsNonInterleaved: @YES
+    } mutableCopy];
+
+    if (requestedChannels > 0)
+        settings[AVNumberOfChannelsKey] = @(requestedChannels);
+
+    if (channelLayoutData != nil)
+        settings[AVChannelLayoutKey] = channelLayoutData;
+
+    return [settings autorelease];
+}
+
+int getChannelCountFromTrack (AVAssetTrack* track)
+{
+    NSArray* trackFormats = track.formatDescriptions;
+    if (trackFormats.count == 0)
+        return 0;
+
+    CMAudioFormatDescriptionRef fmt = (__bridge CMAudioFormatDescriptionRef) trackFormats[0];
+    const AudioStreamBasicDescription* asbd = CMAudioFormatDescriptionGetStreamBasicDescription (fmt);
+    return asbd != nullptr ? (int) asbd->mChannelsPerFrame : 0;
 }
 
 } // namespace
@@ -96,49 +128,58 @@ struct AVAssetAudioReader::Pimpl
                 newReader.timeRange = CMTimeRangeMake (startTime, kCMTimePositiveInfinity);
             }
 
-            NSDictionary* settings = @{
-                AVFormatIDKey: @(kAudioFormatLinearPCM),
-                AVSampleRateKey: @(sampleRate),
-                AVLinearPCMBitDepthKey: @(32),
-                AVLinearPCMIsFloatKey: @YES,
-                AVLinearPCMIsNonInterleaved: @YES,
-                AVNumberOfChannelsKey: @(requestedChannels)
+            const auto startReader = ^int (NSDictionary* settings, int fallbackChannels)
+            {
+                AVAssetReaderTrackOutput* output = [[AVAssetReaderTrackOutput alloc] initWithTrack:track outputSettings:settings];
+                output.alwaysCopiesSampleData = NO;
+
+                if (! [newReader canAddOutput:output])
+                {
+                    [output release];
+                    return 0;
+                }
+
+                [newReader addOutput:output];
+                if (! [newReader startReading])
+                {
+                    [output release];
+                    return 0;
+                }
+
+                reader = newReader;
+                trackOutput = output;
+                currentSamplePosition = (int64_t) std::llround (fromSeconds * sampleRate);
+                return fallbackChannels;
             };
 
-            AVAssetReaderTrackOutput* output = [[AVAssetReaderTrackOutput alloc] initWithTrack:track outputSettings:settings];
-            output.alwaysCopiesSampleData = NO;
+            AudioChannelLayout atmosLayout {};
+            atmosLayout.mChannelLayoutTag = kAtmos714Tag;
+            NSData* atmosLayoutData = [NSData dataWithBytes:&atmosLayout length:offsetof (AudioChannelLayout, mChannelDescriptions)];
 
-            if (! [newReader canAddOutput:output])
+            int actualChannels = startReader (makeOutputSettings (sampleRate, requestedChannels, atmosLayoutData), requestedChannels);
+
+            if (actualChannels <= 0)
             {
-                [output release];
                 [newReader release];
-                return 0;
+                newReader = [[AVAssetReader alloc] initWithAsset:asset error:&error];
+                if (! newReader)
+                    return 0;
+
+                if (fromSeconds > 0.0)
+                {
+                    CMTime startTime = CMTimeMakeWithSeconds (fromSeconds, (int32_t) sampleRate);
+                    newReader.timeRange = CMTimeRangeMake (startTime, kCMTimePositiveInfinity);
+                }
+
+                actualChannels = startReader (makeOutputSettings (sampleRate, 0, nil), getChannelCountFromTrack (track));
             }
 
-            [newReader addOutput:output];
-            if (! [newReader startReading])
-            {
-                [output release];
-                [newReader release];
+            if (actualChannels <= 0)
                 return 0;
-            }
-
-            int actualChannels = 0;
-            NSArray* outFmt = [output formatDescriptions];
-            if (outFmt.count > 0)
-            {
-                CMAudioFormatDescriptionRef fmt = (__bridge CMAudioFormatDescriptionRef) outFmt[0];
-                const AudioStreamBasicDescription* asbd = CMAudioFormatDescriptionGetStreamBasicDescription (fmt);
-                if (asbd != nullptr)
-                    actualChannels = (int) asbd->mChannelsPerFrame;
-            }
 
             if (actualChannels <= 0)
                 actualChannels = requestedChannels;
 
-            reader = newReader;
-            trackOutput = output;
-            currentSamplePosition = (int64_t) std::llround (fromSeconds * sampleRate);
             return actualChannels;
         }
     }

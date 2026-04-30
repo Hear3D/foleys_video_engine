@@ -22,9 +22,8 @@
 
 #include "foleys_FFmpegHelpers.h"
 #include "foleys_FFmpegDecodeBackend.h"
-#include "foleys_AVFoundationDecodeBackend.h"
-#include "foleys_CoreAudioEAC3Backend.h"
 #include "foleys_AVPlayerEAC3Backend.h"
+#include "foleys_CoreAudioEAC3Backend.h"
 
 
 namespace foleys
