@@ -159,6 +159,7 @@ void MovieClip::prepareToPlay (int, double sampleRateToUse)
 
 void MovieClip::releaseResources()
 {
+    backgroundJob.setSuspended (true);
     sampleRate = 0;
 }
 
