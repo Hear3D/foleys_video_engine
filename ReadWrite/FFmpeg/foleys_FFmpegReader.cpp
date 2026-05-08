@@ -25,6 +25,8 @@
 #include "foleys_AVPlayerEAC3Backend.h"
 #include "foleys_CoreAudioEAC3Backend.h"
 
+#include <utility>
+
 
 namespace foleys
 {
@@ -149,7 +151,34 @@ public:
 
     void closeVideoFile()
     {
-        reader.opened = false;
+        std::unique_ptr<IAudioDecodeBackend> backendToDestroy;
+
+        {
+            const juce::ScopedLock lock (stateLock);
+
+            if (! reader.opened
+                && formatContext == nullptr
+                && videoContext == nullptr
+                && audioContext == nullptr
+                && subtitleContext == nullptr
+                && audioConverterContext == nullptr
+                && backend == nullptr)
+                return;
+
+            closing = true;
+            reader.opened = false;
+            backendToDestroy = std::move (backend);
+        }
+
+        // Tear down the pull-based backend first so AVPlayer/AudioQueue disposal
+        // cannot race FFmpeg context and frame cleanup.
+        backendToDestroy.reset();
+
+        const juce::ScopedLock lock (stateLock);
+
+        if (frame != nullptr)
+            av_frame_unref (frame);
+
         resetChannelLayout (channelLayout);
 
         if (videoStreamIdx >= 0)
@@ -177,10 +206,17 @@ public:
 
         if (formatContext != nullptr)
             avformat_close_input (&formatContext);
+
+        closing = false;
     }
 
     void processPacket (VideoFifo& videoFifo, AudioFifo& audioFifo)
     {
+        const juce::ScopedLock lock (stateLock);
+
+        if (closing || formatContext == nullptr)
+            return;
+
         if (backend != nullptr && backend->isPullBased())
         {
             auto block = backend->readNextBlock();
@@ -227,6 +263,11 @@ public:
 
     void setPosition (int64_t position)
     {
+        const juce::ScopedLock lock (stateLock);
+
+        if (closing || formatContext == nullptr)
+            return;
+
         FOLEYS_LOG ("Seek for sample position: " << position);
 //        auto videoPts = av_rescale_q (position, audioContext->time_base, videoContext->time_base);
 //        auto response = av_seek_frame (formatContext, videoStreamIdx, videoPts, AVSEEK_FLAG_BACKWARD);
@@ -242,6 +283,11 @@ public:
 
     juce::Image getStillImage (double seconds, Size size)
     {
+        const juce::ScopedLock lock (stateLock);
+
+        if (closing || formatContext == nullptr || videoContext == nullptr || frame == nullptr)
+            return {};
+
         scaler.setupScaler (videoContext->width,
                             videoContext->height,
                             videoContext->pix_fmt,
@@ -589,6 +635,8 @@ private:
     std::unique_ptr<IAudioDecodeBackend> backend;
     ChannelMapResolver channelMapResolver;
     HostBusMapper hostBusMapper;
+    juce::CriticalSection stateLock;
+    bool closing = false;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (Pimpl)
 };
