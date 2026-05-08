@@ -68,36 +68,37 @@ struct AVPlayerEAC3BackendImpl
         tap = nullptr;
         hasStartedPlaying = false;
 
-        if (localPlayer != nil)
+        auto releaseBlock = ^
         {
-            auto detachPlayer = ^{
+            if (localPlayer != nil)
+            {
                 [localPlayer pause];
                 [localPlayer replaceCurrentItemWithPlayerItem:nil];
-            };
+            }
 
-            if ([NSThread isMainThread])
-                detachPlayer();
-            else
-                dispatch_sync (dispatch_get_main_queue(), detachPlayer);
-        }
+            if (localItem != nil)
+            {
+                [localItem cancelPendingSeeks];
+                localItem.audioMix = nil;
+            }
 
-        if (localItem != nil)
-        {
-            [localItem cancelPendingSeeks];
-            localItem.audioMix = nil;
-        }
+            if (localTap != nullptr)
+                CFRelease (localTap);
 
-        if (localTap != nullptr)
-            CFRelease (localTap);
+            if (localItem != nil)
+                CFRelease ((__bridge CFTypeRef) localItem);
 
-        if (localItem != nil)
-            CFRelease ((__bridge CFTypeRef) localItem);
+            if (localAsset != nil)
+                CFRelease ((__bridge CFTypeRef) localAsset);
 
-        if (localAsset != nil)
-            CFRelease ((__bridge CFTypeRef) localAsset);
+            if (localPlayer != nil)
+                CFRelease ((__bridge CFTypeRef) localPlayer);
+        };
 
-        if (localPlayer != nil)
-            CFRelease ((__bridge CFTypeRef) localPlayer);
+        if ([NSThread isMainThread])
+            releaseBlock();
+        else
+            dispatch_sync (dispatch_get_main_queue(), releaseBlock);
     }
 
     ~AVPlayerEAC3BackendImpl() { releaseAll(); }

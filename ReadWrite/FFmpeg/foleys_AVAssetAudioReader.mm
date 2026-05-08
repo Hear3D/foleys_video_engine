@@ -192,6 +192,40 @@ AVAssetAudioReader::AVAssetAudioReader()
 
 AVAssetAudioReader::~AVAssetAudioReader() = default;
 
+bool AVAssetAudioReader::probeFile (const juce::File& file,
+                                    double sampleRate,
+                                    int requestedChannels,
+                                    int& outChannels,
+                                    double& outDurationSeconds)
+{
+    outChannels = 0;
+    outDurationSeconds = 0.0;
+
+    @autoreleasepool
+    {
+        NSString* path = [NSString stringWithUTF8String:file.getFullPathName().toRawUTF8()];
+        NSURL* url = [NSURL fileURLWithPath:path];
+        AVURLAsset* asset = [AVURLAsset URLAssetWithURL:url options:nil];
+        if (! asset)
+            return false;
+
+        NSArray<AVAssetTrack*>* audioTracks = [asset tracksWithMediaType:AVMediaTypeAudio];
+        if (! audioTracks || audioTracks.count == 0)
+            return false;
+
+        const auto duration = CMTimeGetSeconds (asset.duration);
+        if (std::isfinite (duration) && duration > 0.0)
+            outDurationSeconds = duration;
+    }
+
+    AVAssetAudioReader reader;
+    if (! reader.open (file, sampleRate, requestedChannels))
+        return false;
+
+    outChannels = reader.getNumOutputChannels();
+    return outChannels > 0;
+}
+
 bool AVAssetAudioReader::open (const juce::File& file, double sr, int requestedChannels)
 {
     close();

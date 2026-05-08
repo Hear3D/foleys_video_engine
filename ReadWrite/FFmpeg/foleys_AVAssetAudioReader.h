@@ -22,6 +22,12 @@ public:
     double getSampleRate() const      { return sampleRate; }
     bool isOpenedOk() const           { return opened; }
 
+    static bool probeFile (const juce::File& file,
+                           double sampleRate,
+                           int requestedChannels,
+                           int& outChannels,
+                           double& outDurationSeconds);
+
     bool isAtEnd() const;
     void setPosition (int64_t samplePosition);
 

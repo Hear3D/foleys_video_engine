@@ -37,7 +37,9 @@ class FFmpegReader::Pimpl
 public:
     Pimpl (FFmpegReader& readerToUse, juce::File file, StreamTypes type)  : reader (readerToUse)
     {
-        frame = av_frame_alloc();
+        audioFrame = av_frame_alloc();
+        videoFrame = av_frame_alloc();
+        stillFrame = av_frame_alloc();
 
         auto ret = avformat_open_input (&formatContext, file.getFullPathName().toRawUTF8(), nullptr, nullptr);
         if (ret < 0)
@@ -146,7 +148,9 @@ public:
     ~Pimpl()
     {
         closeVideoFile();
-        av_frame_free (&frame);
+        av_frame_free (&audioFrame);
+        av_frame_free (&videoFrame);
+        av_frame_free (&stillFrame);
     }
 
     void closeVideoFile()
@@ -176,8 +180,14 @@ public:
 
         const juce::ScopedLock lock (stateLock);
 
-        if (frame != nullptr)
-            av_frame_unref (frame);
+        if (audioFrame != nullptr)
+            av_frame_unref (audioFrame);
+
+        if (videoFrame != nullptr)
+            av_frame_unref (videoFrame);
+
+        if (stillFrame != nullptr)
+            av_frame_unref (stillFrame);
 
         resetChannelLayout (channelLayout);
 
@@ -285,7 +295,7 @@ public:
     {
         const juce::ScopedLock lock (stateLock);
 
-        if (closing || formatContext == nullptr || videoContext == nullptr || frame == nullptr)
+        if (closing || formatContext == nullptr || videoContext == nullptr || stillFrame == nullptr)
             return {};
 
         scaler.setupScaler (videoContext->width,
@@ -315,20 +325,21 @@ public:
                     FOLEYS_LOG ("Error reading packet for still image: " << getErrorString (response));
                     break;
                 }
-                response = avcodec_receive_frame(videoContext, frame);
+                response = avcodec_receive_frame (videoContext, stillFrame);
                 if (response < 0)
                 {
                     FOLEYS_LOG ("Error reading frame for still image: " << getErrorString (response));
                 }
 
-                if (frame->best_effort_timestamp + getFrameDuration (frame) > targetPts)
+                if (stillFrame->best_effort_timestamp + getFrameDuration (stillFrame) > targetPts)
                     break;
             }
         }
-        FOLEYS_LOG ("Still PTS: " << frame->best_effort_timestamp << " vs. " << targetPts);
+        FOLEYS_LOG ("Still PTS: " << stillFrame->best_effort_timestamp << " vs. " << targetPts);
         juce::Image image (juce::Image::ARGB, size.width, size.height, false);
-        scaler.convertFrameToImage (image, frame);
+        scaler.convertFrameToImage (image, stillFrame);
         av_packet_unref (packet);
+        av_packet_free (&packet);
 
         return image;
     }
@@ -515,7 +526,7 @@ private:
         }
 
         while (response >= 0) {
-            response = avcodec_receive_frame(videoContext, frame);
+            response = avcodec_receive_frame (videoContext, videoFrame);
             if (response >= 0)
             {
                 AVRational timeBase = av_make_q (1, AV_TIME_BASE);
@@ -525,19 +536,19 @@ private:
                 }
 
                 auto& target = videoFifo.getWritingFrame();
-                if (target.image.getWidth() != frame->width || target.image.getHeight() != frame->height)
-                    target.image = juce::Image (juce::Image::ARGB, frame->width, frame->height, false);
+                if (target.image.getWidth() != videoFrame->width || target.image.getHeight() != videoFrame->height)
+                    target.image = juce::Image (juce::Image::ARGB, videoFrame->width, videoFrame->height, false);
 
-                scaler.convertFrameToImage (target.image, frame);
-                target.timecode = frame->best_effort_timestamp;
+                scaler.convertFrameToImage (target.image, videoFrame);
+                target.timecode = videoFrame->best_effort_timestamp;
                 videoFifo.finishWriting();
 
                 FOLEYS_LOG ("Stream " << juce::String (packet.stream_index) <<
                      " (Video) " <<
                      " DTS: " << juce::String (packet.dts) <<
                      " PTS: " << juce::String (packet.pts) <<
-                     " best effort PTS: " << juce::String (frame->best_effort_timestamp) <<
-                     " in ms: " << juce::String (frame->best_effort_timestamp * av_q2d (timeBase) * 1000.0) <<
+                     " best effort PTS: " << juce::String (videoFrame->best_effort_timestamp) <<
+                     " in ms: " << juce::String (videoFrame->best_effort_timestamp * av_q2d (timeBase) * 1000.0) <<
                      " timebase: " << juce::String (timeBase.num != 0 ? double (timeBase.den) / double (timeBase.num) : 0));
             }
         }
@@ -550,7 +561,7 @@ private:
         // decode audio frame
         while (response >= 0)
         {
-            response = avcodec_receive_frame (audioContext, frame);
+            response = avcodec_receive_frame (audioContext, audioFrame);
             if (response == AVERROR(EAGAIN) || response == AVERROR_EOF)
             {
                 break;
@@ -565,15 +576,15 @@ private:
                         " (Audio) " <<
                         " DTS: " << juce::String (packet.dts) <<
                         " PTS: " << juce::String (packet.pts) <<
-                        " Frame PTS: " << juce::String (frame->best_effort_timestamp) <<
-                        " in ms: " << juce::String (frame->best_effort_timestamp * 1000.0 / reader.sampleRate) <<
+                        " Frame PTS: " << juce::String (audioFrame->best_effort_timestamp) <<
+                        " in ms: " << juce::String (audioFrame->best_effort_timestamp * 1000.0 / reader.sampleRate) <<
                         " timebase: " << reader.sampleRate);
 
-            if (frame->extended_data != nullptr  && reader.sampleRate > 0)
+            if (audioFrame->extended_data != nullptr  && reader.sampleRate > 0)
             {
-                const int  channels     = getFrameChannelCount (frame);
-                const auto numSamples   = frame->nb_samples;
-                const auto outTimestamp = int64_t (frame->best_effort_timestamp * outputSampleRate / reader.sampleRate);
+                const int  channels     = getFrameChannelCount (audioFrame);
+                const auto numSamples   = audioFrame->nb_samples;
+                const auto outTimestamp = int64_t (audioFrame->best_effort_timestamp * outputSampleRate / reader.sampleRate);
                 const auto numProduced  = int (numSamples * outputSampleRate / reader.sampleRate);
 
                 jassert (std::abs (audioFifo.getWritePosition() - outTimestamp) < std::numeric_limits<int>::max());
@@ -590,7 +601,7 @@ private:
 
                 swr_convert (audioConverterContext,
                              (uint8_t**)audioConvertBuffer.getArrayOfWritePointers(), numProduced,
-                             (const uint8_t**)frame->extended_data, numSamples);
+                             (const uint8_t**)audioFrame->extended_data, numSamples);
                 juce::AudioBuffer<float> buffer (audioConvertBuffer.getArrayOfWritePointers(), channels, int (offset), int (numProduced - offset));
                 audioFifo.pushSamples (buffer);
             }
@@ -626,7 +637,9 @@ private:
     SwrContext*       audioConverterContext = nullptr;
     FFmpegVideoScaler scaler;
 
-    AVFrame  *frame             = nullptr;
+    AVFrame* audioFrame         = nullptr;
+    AVFrame* videoFrame         = nullptr;
+    AVFrame* stillFrame         = nullptr;
 
     FoleysChannelLayout channelLayout = makeStereoChannelLayout();
     double    outputSampleRate = {};
