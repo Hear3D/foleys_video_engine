@@ -31,12 +31,22 @@ void AudioFifo::pushSamples (const juce::AudioBuffer<float>& samples)
     jassert (samples.getNumSamples()  <  audioFifo.getFreeSpace());
 
     auto write = audioFifo.write(samples.getNumSamples());
+    const auto sourceChannels = samples.getNumChannels();
+    const auto destChannels = audioBuffer.getNumChannels();
+    const auto channelsToCopy = juce::jmin (sourceChannels, destChannels);
 
-    for (int c=0; c<audioBuffer.getNumChannels(); ++c)
+    for (int c = 0; c < channelsToCopy; ++c)
     {
         audioBuffer.copyFrom (c, write.startIndex1, samples.getReadPointer (c), write.blockSize1);
         if (write.blockSize2 > 0)
             audioBuffer.copyFrom (c, write.startIndex2, samples.getReadPointer (c, write.blockSize1), write.blockSize2);
+    }
+
+    for (int c = channelsToCopy; c < destChannels; ++c)
+    {
+        audioBuffer.clear (c, write.startIndex1, write.blockSize1);
+        if (write.blockSize2 > 0)
+            audioBuffer.clear (c, write.startIndex2, write.blockSize2);
     }
 
     writePosition.fetch_add (write.blockSize1 + write.blockSize2);
