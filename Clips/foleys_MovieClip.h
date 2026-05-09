@@ -40,6 +40,7 @@ class MovieClip   : public AVClip,
 {
 public:
     MovieClip (VideoEngine& videoEngine);
+    ~MovieClip() override;
 
     /** Used to identify the clip type to the user */
     juce::String getClipType() const override { return NEEDS_TRANS ("Movie"); }

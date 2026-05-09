@@ -28,6 +28,16 @@ MovieClip::MovieClip (VideoEngine& engine)
     addDefaultVideoParameters (*this);
 }
 
+MovieClip::~MovieClip()
+{
+        // Quiesce the decode job before reader teardown so FFmpeg frames cannot be
+        // touched concurrently while the reader is being destroyed.
+        backgroundJob.setSuspended (true);
+        sampleRate = 0;
+        thumbnailReader.reset();
+        movieReader.reset();
+}
+
 juce::String MovieClip::getDescription() const
 {
     if (movieReader)

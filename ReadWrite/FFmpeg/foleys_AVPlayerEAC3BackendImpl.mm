@@ -26,6 +26,17 @@
 namespace foleys
 {
 
+namespace
+{
+AVPlayer* retainPlayerForAsyncUse (AVPlayer* player)
+{
+    if (player == nil)
+        return nil;
+
+    return (AVPlayer*) CFBridgingRelease (CFRetain ((__bridge CFTypeRef) player));
+}
+}
+
 // ============================================================================
 // AVPlayerEAC3BackendImpl — holds all Obj-C objects + ring buffer
 // ============================================================================
@@ -70,16 +81,16 @@ struct AVPlayerEAC3BackendImpl
 
         auto releaseBlock = ^
         {
-            if (localPlayer != nil)
-            {
-                [localPlayer pause];
-                [localPlayer replaceCurrentItemWithPlayerItem:nil];
-            }
-
             if (localItem != nil)
             {
                 [localItem cancelPendingSeeks];
                 localItem.audioMix = nil;
+            }
+
+            if (localPlayer != nil)
+            {
+                [localPlayer pause];
+                [localPlayer replaceCurrentItemWithPlayerItem:nil];
             }
 
             if (localTap != nullptr)
@@ -173,10 +184,10 @@ struct AVPlayerEAC3BackendImpl
         if (player != nil && ! hasStartedPlaying)
         {
             hasStartedPlaying = true;  // set BEFORE dispatch to prevent double-call
-            __strong AVPlayer* p = player;
+            AVPlayer* retainedPlayer = retainPlayerForAsyncUse (player);
             dispatch_async (dispatch_get_main_queue(), ^{
-                if (p.currentItem != nil)
-                    [p play];
+                if (retainedPlayer.currentItem != nil)
+                    [retainedPlayer play];
             });
             LOGI ("AVPlayerEAC3Backend starting playback (dispatched to main thread)");
         }
@@ -344,18 +355,18 @@ struct AVPlayerEAC3BackendImpl
         CMTime seekTime = CMTimeMakeWithSeconds (secs, 48000);
 
         // All AVPlayer operations must be on the main thread.
-        __strong AVPlayer* p = player;
+        AVPlayer* retainedPlayer = retainPlayerForAsyncUse (player);
         hasStartedPlaying = true;  // set before dispatch
         auto seekBlock = ^{
-            if (p.currentItem == nil)
+            if (retainedPlayer.currentItem == nil)
                 return;
 
-            [p seekToTime:seekTime
+            [retainedPlayer seekToTime:seekTime
                toleranceBefore:kCMTimeZero
                 toleranceAfter:kCMTimeZero
              completionHandler:^(BOOL) {
-                 if (p.currentItem != nil)
-                     [p play];
+                 if (retainedPlayer.currentItem != nil)
+                     [retainedPlayer play];
              }];
         };
 
