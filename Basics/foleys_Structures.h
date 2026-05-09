@@ -63,9 +63,11 @@ struct VideoStreamSettings final
 struct AudioStreamSettings final
 {
     int numChannels = 2;
+    int sourceNumChannels = 0;
     int defaultNumSamples = 1024;
     int timebase = 48000;
     int bitsPerSample = 0;
+    bool isEnhancedAC3 = false;
     [[nodiscard]] bool isValid() const { return (timebase > 0) && (numChannels > 0) && (bitsPerSample > 0); }
     [[nodiscard]] juce::String toString() const { return juce::String(numChannels) + " channels at " + juce::String(timebase) + " Hz @ " + juce::String(bitsPerSample) + " bits"; }
     [[nodiscard]] int getFrameSize() const { return numChannels * getSampleSize(); }

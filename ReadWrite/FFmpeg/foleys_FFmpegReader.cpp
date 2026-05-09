@@ -441,8 +441,10 @@ public:
 
         foleys::AudioStreamSettings settings;
         settings.numChannels = reader.numChannels;
+        settings.sourceNumChannels = getCodecContextChannelCount (audioContext);
         settings.timebase = audioContext->sample_rate;
         settings.defaultNumSamples = int (audioContext->max_samples);
+        settings.isEnhancedAC3 = audioContext->codec_id == AV_CODEC_ID_EAC3;
         return settings;
     }
 
