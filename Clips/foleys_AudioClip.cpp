@@ -185,7 +185,7 @@ std::shared_ptr<AVClip> AudioClip::createCopy (StreamTypes types)
     if (engine == nullptr)
         return {};
 
-    return engine->createClipFromFile (getMediaFile(), types);
+    return engine->createClipFromFile (getMediaFile(), types).clip;
 }
 
 } // foleys

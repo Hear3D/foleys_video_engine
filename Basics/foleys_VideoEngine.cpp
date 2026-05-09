@@ -50,13 +50,13 @@ VideoEngine::~VideoEngine()
     masterReference.clear();
 }
 
-std::shared_ptr<AVClip> VideoEngine::createClipFromFile (juce::URL url, StreamTypes type)
+CreatedClipResult VideoEngine::createClipFromFile (juce::URL url, StreamTypes type)
 {
-    auto clip = formatManager.createClipFromFile (*this, url, type);
-    if (clip)
-        manageLifeTime (clip);
+    auto createdClip = formatManager.createClipFromFile (*this, url, type);
+    if (createdClip.clip)
+        manageLifeTime (createdClip.clip);
 
-    return clip;
+    return createdClip;
 }
 
 std::unique_ptr<AVReader> VideoEngine::createReaderFor (juce::File file, StreamTypes type)

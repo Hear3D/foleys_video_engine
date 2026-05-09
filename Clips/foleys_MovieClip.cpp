@@ -248,7 +248,7 @@ std::shared_ptr<AVClip> MovieClip::createCopy (StreamTypes types)
     if (engine == nullptr)
         return {};
 
-    return engine->createClipFromFile (getMediaFile(), types);
+    return engine->createClipFromFile (getMediaFile(), types).clip;
 }
 
 double MovieClip::getSampleRate() const

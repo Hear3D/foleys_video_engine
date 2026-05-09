@@ -74,7 +74,7 @@ ClipDescriptor::ClipDescriptor (ComposedClip& ownerToUse, juce::ValueTree stateT
     {
         auto source = state.getProperty (IDs::source);
 
-        clip = engine->createClipFromFile ({ source });
+        clip = engine->createClipFromFile ({ source }).clip;
         if (clip)
         {
             audioParameterController.setClip (clip->getAudioParameters(), state.getOrCreateChildWithName (IDs::audioParameters, undoManager), undoManager);

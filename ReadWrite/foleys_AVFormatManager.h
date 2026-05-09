@@ -36,6 +36,25 @@ struct AVFormat {
     virtual std::unique_ptr<AVWriter> createWriterFor(juce::File file, StreamTypes type = StreamTypes::all()) = 0;
 };
 
+struct CreatedClipResult final
+{
+    std::shared_ptr<AVClip> clip;
+    AudioStreamSettings audioSettings;
+    double durationSeconds = 0.0;
+    double playbackSampleRate = 0.0;
+    int playbackNumChannels = 0;
+
+    [[nodiscard]] bool hasPlaybackAudio() const
+    {
+        return playbackSampleRate > 0.0 && playbackNumChannels > 0 && durationSeconds > 0.0;
+    }
+
+    [[nodiscard]] explicit operator bool() const
+    {
+        return clip != nullptr;
+    }
+};
+
 
 /**
  @class AVFormatManager
@@ -54,7 +73,7 @@ public:
 
     AVFormatManager();
 
-    std::shared_ptr<AVClip> createClipFromFile (VideoEngine& engine, juce::URL url, StreamTypes type = StreamTypes::all());
+    CreatedClipResult createClipFromFile (VideoEngine& engine, juce::URL url, StreamTypes type = StreamTypes::all());
 
     std::unique_ptr<AVReader> createReaderFor (juce::File file, StreamTypes type = StreamTypes::all());
 

@@ -26,13 +26,14 @@ AVFormatManager::AVFormatManager()
     audioFormatManager.registerBasicFormats();
 }
 
-std::shared_ptr<AVClip> AVFormatManager::createClipFromFile (VideoEngine& engine, juce::URL url, StreamTypes type)
+CreatedClipResult AVFormatManager::createClipFromFile (VideoEngine& engine, juce::URL url, StreamTypes type)
 {
     const auto& factory = factories.find (url.getScheme());
     if (factory != factories.end())
     {
-        auto clip = std::shared_ptr<foleys::AVClip> (factory->second (engine, url, type));
-        return clip;
+        CreatedClipResult result;
+        result.clip = std::shared_ptr<foleys::AVClip> (factory->second (engine, url, type));
+        return result;
     }
 
     if (url.isLocalFile())
@@ -44,7 +45,9 @@ std::shared_ptr<AVClip> AVFormatManager::createClipFromFile (VideoEngine& engine
             auto clip = std::make_shared<ImageClip> (engine);
             clip->setImage (image);
             clip->setMediaFile (url);
-            return clip;
+            CreatedClipResult result;
+            result.clip = clip;
+            return result;
         }
 
         // findFormatForFileExtension would consume some video formats as well
@@ -54,9 +57,19 @@ std::shared_ptr<AVClip> AVFormatManager::createClipFromFile (VideoEngine& engine
             if (auto* audio = audioFormatManager.createReaderFor (file))
             {
                 auto clip = std::make_shared<AudioClip> (engine);
+                CreatedClipResult result;
+                result.clip = clip;
+                result.playbackNumChannels = audio->numChannels;
+                result.playbackSampleRate = audio->sampleRate;
+                result.durationSeconds = audio->sampleRate > 0.0 ? audio->lengthInSamples / audio->sampleRate : 0.0;
+                result.audioSettings.numChannels = audio->numChannels;
+                result.audioSettings.sourceNumChannels = audio->numChannels;
+                result.audioSettings.timebase = int (audio->sampleRate);
+                result.audioSettings.bitsPerSample = audio->bitsPerSample;
+                result.audioSettings.defaultNumSamples = 1024;
                 clip->setAudioFormatReader (audio);
                 clip->setMediaFile (url);
-                return clip;
+                return result;
             }
         }
 
@@ -64,11 +77,29 @@ std::shared_ptr<AVClip> AVFormatManager::createClipFromFile (VideoEngine& engine
         if (reader && reader->isOpenedOk())
         {
             auto clip = std::make_shared<MovieClip> (engine);
+            CreatedClipResult result;
+            result.clip = clip;
+            result.playbackSampleRate = reader->sampleRate;
+            result.playbackNumChannels = reader->numChannels;
+            result.durationSeconds = reader->getLengthInSeconds();
+
+            if (reader->getNumAudioStreams() > 0)
+                result.audioSettings = reader->getAudioSettings (0);
+
+            if (result.audioSettings.numChannels <= 0)
+                result.audioSettings.numChannels = reader->numChannels;
+
+            if (result.audioSettings.sourceNumChannels <= 0)
+                result.audioSettings.sourceNumChannels = reader->numChannels;
+
+            if (result.audioSettings.timebase <= 0)
+                result.audioSettings.timebase = int (reader->sampleRate);
+
             if (reader->hasVideo())
                 clip->setThumbnailReader (AVFormatManager::createReaderFor (file, StreamTypes::video()));
 
             clip->setReader (std::move (reader));
-            return clip;
+            return result;
         }
     }
 
