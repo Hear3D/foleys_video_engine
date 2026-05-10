@@ -17,6 +17,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cstdint>
 #include <cstring>
 #include <vector>
 
@@ -61,8 +62,11 @@ struct AVPlayerEAC3BackendImpl
     int                             ringSamples   = 0;
     int                             outputChannels = kMaxCh;
     int                             outputSampleRate = 48000;
+    AudioStreamBasicDescription     tapFormat {};
     std::atomic<bool>               flushing { false };
     bool                            hasStartedPlaying { false };
+    bool                            hasLoggedTapLayoutError { false };
+    bool                            hasLoggedUnsupportedTapFormat { false };
 
     // ---- Init / teardown ----
 
@@ -134,8 +138,58 @@ struct AVPlayerEAC3BackendImpl
 
     // ---- Tap callbacks ----
 
-    void tapPrepare (int numChannels, double rate)
+    static bool isClearlyInvalidPointer (const void* ptr)
     {
+        const auto value = reinterpret_cast<uintptr_t> (ptr);
+        return value != 0 && value < 4096;
+    }
+
+    template <typename SampleReader>
+    void writeToRing (int numFrames, int numChannels, SampleReader&& reader)
+    {
+        if (flushing.load (std::memory_order_acquire) || ringSamples == 0)
+            return;
+
+        const int nch = std::min (numChannels, std::min (outputChannels, kMaxCh));
+        if (nch <= 0 || fifo.getFreeSpace() < numFrames)
+            return;  // ring full — drop to avoid blocking
+
+        int start1, size1, start2, size2;
+        fifo.prepareToWrite (numFrames, start1, size1, start2, size2);
+        const int total = size1 + size2;
+        if (total == 0)
+            return;
+
+        for (int c = 0; c < std::min (outputChannels, kMaxCh); ++c)
+        {
+            auto* dst = ring[(size_t) c].data();
+
+            if (c < nch)
+            {
+                for (int i = 0; i < size1; ++i)
+                    dst[start1 + i] = reader (c, i);
+                for (int i = 0; i < size2; ++i)
+                    dst[i] = reader (c, size1 + i);
+            }
+            else
+            {
+                std::fill_n (dst + start1, size1, 0.0f);
+                std::fill_n (dst,          size2, 0.0f);
+            }
+        }
+
+        fifo.finishedWrite (total);
+    }
+
+    void tapPrepare (const AudioStreamBasicDescription& format)
+    {
+        tapFormat = format;
+        hasLoggedTapLayoutError = false;
+        hasLoggedUnsupportedTapFormat = false;
+
+        const int numChannels = (int) format.mChannelsPerFrame;
+        const double rate = format.mSampleRate;
+
         LOGI ("AVPlayerEAC3Backend tapPrepare numCh=%d rate=%.0f", numChannels, rate);
         initRing (numChannels, (int) rate);
     }
@@ -143,33 +197,106 @@ struct AVPlayerEAC3BackendImpl
     void tapUnprepare()
     {
         LOGI ("AVPlayerEAC3Backend tapUnprepare");
+        tapFormat = {};
+        hasLoggedTapLayoutError = false;
+        hasLoggedUnsupportedTapFormat = false;
         flushRing();
     }
 
     void tapProcess (const float* const* channelPtrs, int numFrames)
     {
-        if (flushing.load (std::memory_order_acquire) || ringSamples == 0)
-            return;
+        writeToRing (numFrames, outputChannels,
+                     [&] (int channel, int frame)
+                     {
+                         const auto* src = channelPtrs[channel];
+                         return src != nullptr ? src[frame] : 0.0f;
+                     });
+    }
 
-        const int nch = outputChannels;
-        if (fifo.getFreeSpace() < numFrames)
-            return;  // ring full — drop to avoid blocking
+    void tapProcessInterleaved (const float* samples, int numFrames, int numChannels)
+    {
+        writeToRing (numFrames, numChannels,
+                     [&] (int channel, int frame)
+                     {
+                         return samples[(size_t) frame * (size_t) numChannels + (size_t) channel];
+                     });
+    }
 
-        int start1, size1, start2, size2;
-        fifo.prepareToWrite (numFrames, start1, size1, start2, size2);
-        if (size1 + size2 == 0) return;
+    void tapProcessBufferList (const AudioBufferList& bufList, int numFrames)
+    {
+        const bool isFloat = (tapFormat.mFormatFlags & kAudioFormatFlagIsFloat) != 0;
+        const bool isNonInterleaved = (tapFormat.mFormatFlags & kAudioFormatFlagIsNonInterleaved) != 0;
+        const int numChannels = std::max (1, (int) tapFormat.mChannelsPerFrame);
+        const int bytesPerFrame = (int) tapFormat.mBytesPerFrame;
+        const int sampleBytes = isNonInterleaved ? bytesPerFrame
+                                                 : (numChannels > 0 ? bytesPerFrame / numChannels : 0);
 
-        for (int c = 0; c < std::min (nch, kMaxCh); ++c)
+        if (! isFloat || sampleBytes != (int) sizeof (float))
         {
-            if (channelPtrs[c] == nullptr) continue;
-            auto* dst = ring[(size_t) c].data();
-            if (size1 > 0)
-                std::memcpy (dst + start1, channelPtrs[c],        (size_t) size1 * sizeof (float));
-            if (size2 > 0)
-                std::memcpy (dst,          channelPtrs[c] + size1, (size_t) size2 * sizeof (float));
+            if (! hasLoggedUnsupportedTapFormat)
+            {
+                hasLoggedUnsupportedTapFormat = true;
+                LOGE ("AVPlayerEAC3Backend unsupported tap format flags=0x%x bytesPerFrame=%u channels=%u",
+                      (unsigned int) tapFormat.mFormatFlags,
+                      (unsigned int) tapFormat.mBytesPerFrame,
+                      (unsigned int) tapFormat.mChannelsPerFrame);
+            }
+            return;
         }
 
-        fifo.finishedWrite (size1 + size2);
+        if (isNonInterleaved)
+        {
+            const int availableBuffers = std::min ((int) bufList.mNumberBuffers, std::min (numChannels, kMaxCh));
+            const size_t requiredBytes = (size_t) numFrames * sizeof (float);
+            const float* ptrs[kMaxCh] = {};
+
+            for (int c = 0; c < availableBuffers; ++c)
+            {
+                const auto& buffer = bufList.mBuffers[c];
+                if (buffer.mData == nullptr || isClearlyInvalidPointer (buffer.mData)
+                    || buffer.mDataByteSize < requiredBytes)
+                {
+                    if (! hasLoggedTapLayoutError)
+                    {
+                        hasLoggedTapLayoutError = true;
+                        LOGE ("AVPlayerEAC3Backend invalid planar tap buffer[%d] ptr=%p size=%u required=%zu",
+                              c, buffer.mData, (unsigned int) buffer.mDataByteSize, requiredBytes);
+                    }
+                    return;
+                }
+
+                ptrs[c] = reinterpret_cast<const float*> (buffer.mData);
+            }
+
+            tapProcess (ptrs, numFrames);
+            return;
+        }
+
+        if (bufList.mNumberBuffers < 1)
+        {
+            if (! hasLoggedTapLayoutError)
+            {
+                hasLoggedTapLayoutError = true;
+                LOGE ("AVPlayerEAC3Backend missing interleaved tap buffer");
+            }
+            return;
+        }
+
+        const auto& buffer = bufList.mBuffers[0];
+        const size_t requiredBytes = (size_t) numFrames * (size_t) bytesPerFrame;
+        if (buffer.mData == nullptr || isClearlyInvalidPointer (buffer.mData)
+            || buffer.mDataByteSize < requiredBytes)
+        {
+            if (! hasLoggedTapLayoutError)
+            {
+                hasLoggedTapLayoutError = true;
+                LOGE ("AVPlayerEAC3Backend invalid interleaved tap buffer ptr=%p size=%u required=%zu",
+                      buffer.mData, (unsigned int) buffer.mDataByteSize, requiredBytes);
+            }
+            return;
+        }
+
+        tapProcessInterleaved (reinterpret_cast<const float*> (buffer.mData), numFrames, numChannels);
     }
 
     // ---- PCM pull ----
@@ -257,7 +384,7 @@ struct AVPlayerEAC3BackendImpl
                                   const AudioStreamBasicDescription* fmt)
             {
                 auto* s = static_cast<AVPlayerEAC3BackendImpl*> (MTAudioProcessingTapGetStorage (t));
-                s->tapPrepare ((int) fmt->mChannelsPerFrame, (double) fmt->mSampleRate);
+                s->tapPrepare (*fmt);
             };
             cbs.unprepare  = [] (MTAudioProcessingTapRef t)
             {
@@ -277,11 +404,7 @@ struct AVPlayerEAC3BackendImpl
                 if (rendered <= 0) return;
 
                 auto* s   = static_cast<AVPlayerEAC3BackendImpl*> (MTAudioProcessingTapGetStorage (t));
-                const int nch = (int) bufList->mNumberBuffers;
-                const float* ptrs[kMaxCh] = {};
-                for (int c = 0; c < std::min (nch, kMaxCh); ++c)
-                    ptrs[c] = reinterpret_cast<const float*> (bufList->mBuffers[c].mData);
-                s->tapProcess (ptrs, (int) rendered);
+                s->tapProcessBufferList (*bufList, (int) rendered);
                 *framesOut = rendered;
             };
 
